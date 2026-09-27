@@ -1,0 +1,27 @@
+{
+ "winner": "svm_rbf",
+ "settings": {
+  "model__C": "10.0",
+  "model__gamma": "0.1"
+ },
+ "test": {
+  "accuracy": 0.9961538461538462,
+  "f1_defect": 0.9968051118210862,
+  "recall_defect": 0.9968051118210862,
+  "precision_defect": 0.9968051118210862,
+  "missed_defects": 1,
+  "false_alarms": 1,
+  "roc_auc": 0.9974379157599049
+ },
+ "timing": {
+  "images_timed": 300,
+  "median_ms": 141.4,
+  "p95_ms": 156.2,
+  "mean_ms": 143.3,
+  "images_per_second": 7.1
+ },
+ "localizer": {
+  "quantile": 0.9999,
+  "min_area": 10
+ }
+}

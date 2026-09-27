@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.coverage
+
+# Secrets
+kaggle.json
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Note: data/raw/ and reports/figures/ are tracked so the project is
+# reproducible and self-contained for review.
+
+# The raw Kaggle download. Only casting_512x512 is used, and its 1,300 images
+# are already in data/raw/; the augmented casting_data set is excluded by the brief.
+archive/

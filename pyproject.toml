@@ -1,0 +1,38 @@
+[project]
+name = "casting-qa"
+version = "0.1.0"
+description = "Classical image-processing quality assurance for metal castings"
+requires-python = ">=3.12"
+dependencies = [
+    "joblib>=1.4",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scikit-image>=0.24",
+    "scikit-learn>=1.5",
+    "scipy>=1.14",
+    "matplotlib>=3.9",
+    "pillow>=10.4",
+    "pywavelets>=1.6",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "pytest>=8.3", "jupyterlab>=4.2", "ipykernel>=6.29"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["casting_qa*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
