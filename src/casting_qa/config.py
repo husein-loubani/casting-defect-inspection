@@ -37,9 +37,10 @@ SPLIT_FOLDS = 10
 
 RANDOM_SEED = 42
 
-# Featurization is independent per image, so it runs on every core. Timing is
-# measured separately on one core, image by image.
-N_JOBS = -1
+# Featurization is independent per image, so it runs on all cores but one,
+# which keeps the machine responsive. Timing is measured separately on one
+# core, image by image.
+N_JOBS = -2
 
 IMAGE_SIZE = 512
 PIXEL_MAX = 255
@@ -47,7 +48,9 @@ PIXEL_MAX = 255
 # Median rather than Gaussian for the first pass: it removes isolated grain and
 # JPEG speckle while keeping a step edge a step, and the edge of a chip is the
 # signal. The kernel stays at 3 because a pin hole is only a few pixels across.
+# The Gaussian alternative is run as an ablation with a comparable footprint.
 MEDIAN_KERNEL = 3
+GAUSSIAN_ABLATION_SIGMA = 1.0
 
 # Blow holes run roughly 10-40 px across at 512, pin holes 5-15. A top-hat
 # structuring element has to be larger than the defect it is meant to find and
@@ -173,6 +176,21 @@ SVM_GRID = {
 
 CV_FOLDS = 5
 CV_REPEATS = 5
+
+# Training-time augmentation. Each explore image gets this many extra copies,
+# and each copy applies every transform independently with the given
+# probability, so the model also sees compression without resampling and tone
+# changes without compression. The ranges cover what the rig could plausibly
+# produce: any orientation, a +/-15% tone curve, JPEG quality from 40 to 90.
+AUGMENT_COPIES = 4
+AUGMENT_PROBABILITY = 0.5
+AUGMENT_ROTATION_DEGREES = (0.0, 360.0)
+AUGMENT_GAMMA = (0.85, 1.15)
+AUGMENT_JPEG_QUALITY = (40, 90)
+
+# Decision thresholds on the SVM margin for the operating-point table. Zero is
+# the default boundary; negative values reject more parts, positive fewer.
+OPERATING_THRESHOLDS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
 # Exposure matching: a sound and a defective casting are paired when their
 # corner brightness is within this many gray levels.

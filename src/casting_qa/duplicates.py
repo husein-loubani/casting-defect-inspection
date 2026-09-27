@@ -142,3 +142,18 @@ def cross_partition_pairs(pairs: pd.DataFrame, partition: pd.Series) -> pd.DataF
     second = partition.reindex(pairs["second"]).to_numpy()
     leaked = pairs.assign(first_partition=first, second_partition=second)
     return leaked[leaked["first_partition"] != leaked["second_partition"]].reset_index(drop=True)
+
+
+def images_with_a_twin_in(pairs: pd.DataFrame, partition: pd.Series,
+                          target: str, source: str) -> set[str]:
+    """Images in partition `target` that have a matched photograph in partition `source`."""
+    where_first = partition.reindex(pairs["first"]).to_numpy()
+    where_second = partition.reindex(pairs["second"]).to_numpy()
+    found = set()
+    for first, second, place_first, place_second in zip(
+            pairs["first"], pairs["second"], where_first, where_second, strict=True):
+        if place_first == target and place_second == source:
+            found.add(first)
+        if place_second == target and place_first == source:
+            found.add(second)
+    return found

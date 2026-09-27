@@ -23,7 +23,8 @@ def test_charts_are_figures_with_labeled_axes():
     table = pd.DataFrame({"feature": ["a", "b"], "separation_all": [0.8, 0.7],
                           "separation_matched": [0.75, 0.6]})
     board = pd.DataFrame({"model": ["background floor", "svm_rbf"], "f1_defect": [0.8, 0.95]})
-    robustness = pd.DataFrame({"perturbation": ["gain 1.1"], "accuracy": [0.9], "flipped": [3]})
+    robustness = pd.DataFrame({"model": ["a", "a", "b", "b"], "perturbation": ["none", "gain 1.1"] * 2,
+                               "accuracy": [0.9] * 4, "flipped": [0, 3, 0, 1]})
     charts = [
         plots.plot_class_balance(pd.DataFrame({"label": ["ok", "defective"], "images": [4, 6],
                                                "share_%": [40.0, 60.0]})),
@@ -35,7 +36,7 @@ def test_charts_are_figures_with_labeled_axes():
         plots.plot_model_comparison(board),
         plots.plot_confusion(np.array([0, 1, 1, 0]), np.array([0, 1, 0, 0])),
         plots.plot_localizer_reference(edges, rng.random(10), 0.9999, rng.random(10)),
-        plots.plot_robustness(robustness, 0.95),
+        plots.plot_robustness(robustness),
     ]
     for figure in charts:
         assert isinstance(figure, Figure)
@@ -50,3 +51,10 @@ def test_image_panels_draw_every_box():
     assert len(figure.axes[0].patches) == 2 and len(figure.axes[1].patches) == 1
     grid = plots.plot_image_grid([(image, "a"), (image, "b"), (image, "c")], columns=2)
     assert isinstance(grid, Figure)
+
+
+def test_error_gallery_captions_each_error():
+    image = make_casting(size=64)
+    errors = pd.DataFrame({"filename": ["e.png"], "label": [1], "margin": [-0.2]})
+    figure = plots.plot_errors(errors, pd.Series({"e.png": "e"}), lambda path: image, columns=5)
+    assert "margin -0.20" in figure.axes[0].get_title()

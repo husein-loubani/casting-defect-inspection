@@ -16,6 +16,7 @@ encode how the part was placed rather than whether it is sound.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -30,6 +31,7 @@ from skimage.restoration import estimate_sigma
 from casting_qa.config import (
     BLOB_RESPONSE_LEVEL,
     CORNER_PATCH,
+    GAUSSIAN_ABLATION_SIGMA,
     LBP_INPUT_CEILING,
     LBP_METHOD,
     LBP_POINTS,
@@ -242,14 +244,27 @@ class Stages(NamedTuple):
     response: np.ndarray
 
 
-def pipeline_stages(image: np.ndarray) -> Stages:
+IDENTIFIERS = {"filename", "label", "group", "augmented"}
+
+
+def prefilter(image: np.ndarray, method: str = "median") -> np.ndarray:
+    """The first-pass filter: the shipped median, or the Gaussian it was tested against."""
+    if method == "median":
+        return denoise(image)
+    if method == "gaussian":
+        blurred = ndimage.gaussian_filter(image.astype(np.float64), GAUSSIAN_ABLATION_SIGMA)
+        return np.clip(np.round(blurred), 0, PIXEL_MAX).astype(np.uint8)
+    raise ValueError(f"unknown prefilter {method!r}")
+
+
+def pipeline_stages(image: np.ndarray, method: str = "median") -> Stages:
     """
     Denoise, locate the part, restrict to the band, normalize, and respond.
 
     Feature extraction and defect localization both start from these, so the
     expensive top-hat runs once per image however many consumers there are.
     """
-    clean = denoise(image)
+    clean = prefilter(image, method)
     anchor = find_anchor(clean)
     band = rim_mask(clean, anchor)
     normalized = normalize_to_part(clean, band)
@@ -292,18 +307,31 @@ def features_from(stages: Stages, image: np.ndarray | None = None,
     return features
 
 
-def describe(image: np.ndarray, include_nuisance: bool = False) -> dict[str, float]:
+def describe(image: np.ndarray, include_nuisance: bool = False,
+             method: str = "median") -> dict[str, float]:
     """
     Every feature for one image.
 
     `include_nuisance` adds the confound probes, which belong in the EDA and the
-    control experiments and never in the model.
+    control experiments and never in the model. `method` swaps the prefilter for
+    the ablation and is otherwise left alone.
     """
-    return features_from(pipeline_stages(image), image, include_nuisance)
+    return features_from(pipeline_stages(image, method), image, include_nuisance)
+
+
+def attach_identifiers(rows: list[dict[str, float]], inventory: pd.DataFrame) -> pd.DataFrame:
+    """A feature table with the inventory's filename, label and group (if any) attached."""
+    frame = pd.DataFrame(rows)
+    frame.insert(0, "filename", inventory["filename"].to_numpy())
+    frame["label"] = inventory["label"].to_numpy()
+    if "group" in inventory.columns:
+        frame["group"] = inventory["group"].to_numpy()
+    return frame
 
 
 def describe_batch(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
-                   include_nuisance: bool = False, n_jobs: int = N_JOBS) -> pd.DataFrame:
+                   include_nuisance: bool = False, method: str = "median",
+                   n_jobs: int = N_JOBS) -> pd.DataFrame:
     """
     Features for a whole partition, one image per worker.
 
@@ -311,16 +339,13 @@ def describe_batch(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
     file-system concerns and can be tested on synthetic images.
     """
     rows = Parallel(n_jobs=n_jobs)(
-        delayed(describe)(loader(path), include_nuisance) for path in inventory["path"])
-    frame = pd.DataFrame(rows)
-    frame.insert(0, "filename", inventory["filename"].to_numpy())
-    frame["label"] = inventory["label"].to_numpy()
-    return frame
+        delayed(describe)(loader(path), include_nuisance, method) for path in inventory["path"])
+    return attach_identifiers(rows, inventory)
 
 
 def feature_columns(frame: pd.DataFrame, include_nuisance: bool = False) -> list[str]:
     """The model's input columns: everything numeric that is not an identifier."""
-    columns = [c for c in frame.columns if c not in {"filename", "label"}]
+    columns = [c for c in frame.columns if c not in IDENTIFIERS]
     if not include_nuisance:
         columns = [c for c in columns if not c.startswith("nuisance_")]
     return columns
@@ -349,6 +374,7 @@ def quality_metrics(image: np.ndarray) -> dict[str, float]:
         "anchor_row": float(anchor.center[0]),
         "anchor_col": float(anchor.center[1]),
         "anchor_radius": float(anchor.radius),
+        "anchor_axis_ratio": float(anchor.axis_ratio),
     }
 
 
@@ -356,7 +382,31 @@ def quality_batch(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
                   n_jobs: int = N_JOBS) -> pd.DataFrame:
     """Quality metrics for every image of a partition."""
     rows = Parallel(n_jobs=n_jobs)(delayed(quality_metrics)(loader(p)) for p in inventory["path"])
-    frame = pd.DataFrame(rows)
-    frame.insert(0, "filename", inventory["filename"].to_numpy())
-    frame["label"] = inventory["label"].to_numpy()
-    return frame
+    return attach_identifiers(rows, inventory)
+
+
+def decomposition_check(paths, loader: Callable[[str], np.ndarray]) -> dict[str, float]:
+    """
+    Time the three-radius top-hat with plain and decomposed disks, and measure
+    how far the decomposition moves the response.
+    """
+    timings = {True: [], False: []}
+    peak_change, pixel_change = [], []
+    for path in paths:
+        stages = pipeline_stages(loader(path))
+        outputs = {}
+        for decompose in (True, False):
+            started = time.perf_counter()
+            outputs[decompose] = defect_response(stages.normalized, stages.band, decompose=decompose)
+            timings[decompose].append(time.perf_counter() - started)
+        plain, octagon = outputs[False][stages.band], outputs[True][stages.band]
+        peak_change.append(abs(octagon.max() - plain.max()) / plain.max())
+        pixel_change.append(np.abs(octagon - plain).mean() / plain.mean())
+    return {
+        "images": len(peak_change),
+        "plain_ms": round(1000 * float(np.mean(timings[False])), 1),
+        "decomposed_ms": round(1000 * float(np.mean(timings[True])), 1),
+        "speedup": round(float(np.mean(timings[False]) / np.mean(timings[True])), 1),
+        "max_peak_change_%": round(100 * float(np.max(peak_change)), 2),
+        "mean_pixel_change_%": round(100 * float(np.mean(pixel_change)), 2),
+    }

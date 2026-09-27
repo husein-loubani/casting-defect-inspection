@@ -236,3 +236,19 @@ def inspect_casting(image: np.ndarray, model, columns: list[str], localizer: Loc
     decision = int(model.predict(pd.DataFrame([features_from(stages)])[columns])[0])
     boxes = locate(stages, localizer) if decision == DEFECT else {"strong": [], "weak": []}
     return {"decision": decision, "boxes": boxes}
+
+
+def inspection_gallery(names, path_of: pd.Series, loader: Callable[[str], np.ndarray],
+                       model, columns: list[str], localizer: Localizer) -> list[tuple]:
+    """Image, boxes and caption for each named casting, as the shipped product sees it."""
+    items = []
+    for name in names:
+        image = loader(path_of[name])
+        result = inspect_casting(image, model, columns, localizer)
+        if result["decision"] == DEFECT:
+            evidence = "strong" if result["boxes"]["strong"] else "weak"
+            caption = f"{name}\nflagged, {evidence} evidence"
+        else:
+            caption = f"{name}\npassed, no boxes"
+        items.append((image, result["boxes"], caption))
+    return items

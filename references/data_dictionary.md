@@ -54,4 +54,4 @@ The folder is the ground truth. There is no label file to join against. Defect t
 
 ## Known confound
 
-Defective images were photographed against a darker background than sound ones. On the exploration split, corner patches containing no casting separate the classes with an AUC of 0.767, and a random forest on three background-only probes reaches 0.846 validation accuracy. Every model feature is therefore computed strictly inside the part, and an exposure-matched control quantifies what remains. See the notebook, sections 6 and 11.
+Defective images were photographed against a darker background than sound ones. On the exploration split, corner patches containing no casting separate the classes with an AUC of 0.767, and a random forest on three background-only probes reaches 0.851 validation accuracy. Every model feature is therefore computed strictly inside the part, and an exposure-matched control quantifies what remains. See the notebook, sections 6 and 11.

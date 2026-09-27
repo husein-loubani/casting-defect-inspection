@@ -16,6 +16,7 @@ from casting_qa.duplicates import (
     cross_partition_pairs,
     detail_signature,
     duplicate_groups,
+    images_with_a_twin_in,
     pairwise_similarity,
     similar_pairs,
     threshold_sweep,
@@ -61,3 +62,10 @@ def test_cross_partition_pairs_finds_only_the_leaks():
     leaked = cross_partition_pairs(pairs, partition)
     assert len(leaked) == 1
     assert set(leaked.iloc[0][["first", "second"]]) == {"a", "c"}
+
+
+def test_twins_are_counted_from_the_target_partition_only():
+    pairs = pd.DataFrame({"first": ["a", "b", "c"], "second": ["x", "y", "z"]})
+    partition = pd.Series({"a": "test", "x": "explore", "b": "explore", "y": "test",
+                           "c": "test", "z": "validation"})
+    assert images_with_a_twin_in(pairs, partition, "test", "explore") == {"a", "y"}

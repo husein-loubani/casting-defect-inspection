@@ -10,15 +10,16 @@ produces contains metal rather than background.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from casting_qa.features import wedge_features
 from casting_qa.geometry import (
     Anchor,
     background_mask,
+    class_profiles,
     find_anchor,
     otsu_largest_share,
-    part_mask,
     radial_profile,
     radius_map,
     rim_mask,
@@ -86,12 +87,6 @@ def test_rim_mask_excludes_background_and_cavity():
     assert not (band & corners).any(), "the inspection band reaches image corners"
 
 
-def test_part_mask_contains_the_rim_band():
-    image = make_casting(size=256)
-    anchor = find_anchor(image)
-    assert (rim_mask(image, anchor) & ~part_mask(image, anchor)).sum() == 0
-
-
 def test_unwrapping_turns_rotation_into_a_shift():
     """
     The reason polar coordinates are used at all.
@@ -131,7 +126,8 @@ def test_radial_profile_is_dark_in_the_cavity_and_bright_on_the_rim():
 def test_background_mask_stays_clear_of_the_part():
     image = make_casting(size=256)
     anchor = find_anchor(image)
-    assert not (background_mask(image, anchor) & part_mask(image, anchor)).any()
+    assert not (background_mask(image, anchor) & rim_mask(image, anchor)).any()
+    assert radius_map(image.shape, anchor)[background_mask(image, anchor)].min() >= 2.3 - 1e-9
     assert background_mask(image, anchor)[0, 0], "the corner is workbench"
 
 
@@ -152,3 +148,19 @@ def test_decomposed_disk_approximates_the_plain_disk():
     assert plain.sum() == 1373
     # The octagon covers about 6% more pixels than the disk it replaces.
     assert abs(int(decomposed.sum()) - 1373) / 1373 < 0.10
+
+
+def test_axis_ratio_is_one_for_a_round_cavity_and_less_for_a_foreshortened_one():
+    round_image = make_casting(size=256)
+    # Every other row: the part photographed at a steep tilt, half as tall as it is wide.
+    squashed = np.vstack([round_image[::2], np.full((128, 256), 200, dtype=np.uint8)])
+    assert find_anchor(round_image).axis_ratio > 0.95
+    assert find_anchor(squashed).axis_ratio < 0.7
+
+
+def test_class_profiles_average_each_class():
+    images = {"d": make_casting(seed=1), "o": make_casting(seed=2)}
+    inventory = pd.DataFrame({"path": ["d", "o"], "label": [1, 0]})
+    profiles, edges = class_profiles(inventory, images.__getitem__, per_class=1)
+    assert set(profiles) == {"defective", "ok"}
+    assert len(edges) == len(profiles["ok"]) + 1

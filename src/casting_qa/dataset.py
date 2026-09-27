@@ -10,6 +10,7 @@ that.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from casting_qa.config import (
     IMAGE_SIZE,
     OK,
     OK_DIR,
+    PROCESSED_DIR,
     RANDOM_SEED,
     RAW_DIR,
     SPLIT_FOLDS,
@@ -264,3 +266,20 @@ def class_balance(inventory: pd.DataFrame) -> pd.DataFrame:
         "images": counts.to_numpy(),
         "share_%": (100 * counts / counts.sum()).round(1).to_numpy(),
     }).reset_index(drop=True)
+
+
+def stratified_sample(frame: pd.DataFrame, size: int, seed: int = RANDOM_SEED) -> pd.DataFrame:
+    """About `size` rows drawn so each class keeps its share of the frame."""
+    share = size / len(frame)
+    return pd.concat([part.sample(round(share * len(part)), random_state=seed)
+                      for _, part in frame.groupby("label")]).reset_index(drop=True)
+
+
+def write_processed(tables: dict[str, pd.DataFrame], results: dict,
+                    directory: Path = PROCESSED_DIR) -> list[str]:
+    """Write every table as CSV and the results as JSON; return what was written."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, table in tables.items():
+        table.to_csv(directory / f"{name}.csv", index=False)
+    (directory / "test_results.json").write_text(json.dumps(results, indent=1, default=str))
+    return sorted(path.name for path in directory.iterdir())

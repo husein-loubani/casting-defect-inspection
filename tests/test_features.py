@@ -14,7 +14,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from casting_qa.config import RIM_OUTER_FACTOR
 from casting_qa.features import (
+    decomposition_check,
     defect_response,
     denoise,
     describe,
@@ -23,11 +25,12 @@ from casting_qa.features import (
     features_from,
     normalize_to_part,
     pipeline_stages,
+    prefilter,
     quality_metrics,
     texture_input,
     wedge_features,
 )
-from casting_qa.geometry import find_anchor, part_mask, rim_mask
+from casting_qa.geometry import find_anchor, radius_map, rim_mask
 from tests.conftest import add_defect, make_casting, rim_point
 
 
@@ -96,7 +99,7 @@ def test_nuisance_probes_never_read_the_casting():
     image = make_casting(background=200)
     stages = pipeline_stages(image)
     repainted = image.copy()
-    inside = part_mask(image, stages.anchor)
+    inside = radius_map(image.shape, stages.anchor) <= RIM_OUTER_FACTOR
     repainted[inside] = np.clip(repainted[inside].astype(int) - 60, 0, 255).astype(np.uint8)
     before = describe(image, include_nuisance=True)
     after = describe(repainted, include_nuisance=True)
@@ -177,3 +180,27 @@ def test_feature_columns_excludes_identifiers_and_nuisance():
     assert "label" not in columns and "filename" not in columns
     assert not any(c.startswith("nuisance_") for c in columns)
     assert "nuisance_corner_mean" in feature_columns(frame, include_nuisance=True)
+
+
+def test_prefilters_differ_and_unknown_ones_fail():
+    image = make_casting()
+    assert not np.array_equal(prefilter(image, "median"), prefilter(image, "gaussian"))
+    with pytest.raises(ValueError, match="unknown prefilter"):
+        prefilter(image, "bilateral")
+
+
+def test_group_travels_with_the_features_but_is_not_one():
+    images = {"a": make_casting(seed=1), "b": make_casting(seed=2)}
+    inventory = pd.DataFrame({"path": ["a", "b"], "filename": ["a.png", "b.png"],
+                              "label": [1, 0], "group": [3, 3]})
+    frame = describe_batch(inventory, images.__getitem__, n_jobs=1)
+    assert list(frame["group"]) == [3, 3]
+    assert "group" not in feature_columns(frame)
+
+
+def test_decomposition_check_reports_speed_and_change():
+    images = {"a": make_casting(seed=1)}
+    result = decomposition_check(["a"], images.__getitem__)
+    assert result["images"] == 1
+    assert result["plain_ms"] > 0 and result["decomposed_ms"] > 0
+    assert result["mean_pixel_change_%"] >= 0

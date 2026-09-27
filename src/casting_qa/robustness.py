@@ -1,11 +1,12 @@
 """
-How the shipped classifier holds up when the photograph changes.
+How the classifier holds up when the photograph changes, and how to train it to.
 
 The brief asks for robust classification, and the review asks how variation in
 image quality and lighting is handled. Normalizing by the band's median cancels
-a pure change of exposure in theory; this module measures what happens in
+a pure change of exposure in theory. This module measures what happens in
 practice under rotation, gain, gamma and JPEG re-encoding, on the validation
-split so the sealed test set stays opened once.
+split so the sealed test set stays opened once, and it builds the augmented
+training copies that teach the model to ignore those changes.
 """
 
 from __future__ import annotations
@@ -19,8 +20,20 @@ from joblib import Parallel, delayed
 from PIL import Image
 from skimage import transform
 
-from casting_qa.config import DEFECT, N_JOBS, OK, PIXEL_MAX, ROBUSTNESS_PERTURBATIONS
-from casting_qa.features import describe
+from casting_qa.config import (
+    AUGMENT_COPIES,
+    AUGMENT_GAMMA,
+    AUGMENT_JPEG_QUALITY,
+    AUGMENT_PROBABILITY,
+    AUGMENT_ROTATION_DEGREES,
+    DEFECT,
+    N_JOBS,
+    OK,
+    PIXEL_MAX,
+    RANDOM_SEED,
+    ROBUSTNESS_PERTURBATIONS,
+)
+from casting_qa.features import attach_identifiers, describe
 
 
 def perturb(image: np.ndarray, kind: str, value: float) -> np.ndarray:
@@ -49,33 +62,90 @@ def perturb(image: np.ndarray, kind: str, value: float) -> np.ndarray:
     raise ValueError(f"unknown perturbation {kind!r}")
 
 
-def _perturbed_features(image: np.ndarray, perturbations) -> list[dict[str, float]]:
+def augment_image(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """
+    A random variant of a photograph for training.
+
+    Each transform is applied independently with the configured probability,
+    and at least one always is. Composing them every time would only ever show
+    the model compression on top of resampling blur, so it would never learn
+    what compression alone looks like.
+    """
+    while True:
+        variant = image
+        if rng.random() < AUGMENT_PROBABILITY:
+            variant = perturb(variant, "rotate", float(rng.uniform(*AUGMENT_ROTATION_DEGREES)))
+        if rng.random() < AUGMENT_PROBABILITY:
+            variant = perturb(variant, "gamma", float(rng.uniform(*AUGMENT_GAMMA)))
+        if rng.random() < AUGMENT_PROBABILITY:
+            variant = perturb(variant, "jpeg", float(rng.integers(AUGMENT_JPEG_QUALITY[0],
+                                                                   AUGMENT_JPEG_QUALITY[1] + 1)))
+        if variant is not image:
+            return variant
+
+
+def _augmented_rows(image: np.ndarray, copies: int, seed: int) -> list[dict[str, float]]:
+    rng = np.random.default_rng(seed)
+    return [describe(augment_image(image, rng)) for _ in range(copies)]
+
+
+def augment_batch(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
+                  copies: int = AUGMENT_COPIES, seed: int = RANDOM_SEED,
+                  n_jobs: int = N_JOBS) -> pd.DataFrame:
+    """
+    Features of `copies` augmented variants of every image, marked as augmented.
+
+    Each variant keeps its source's filename and group, so group-aware
+    cross-validation holds a photograph and its variants on the same side.
+    """
+    rows = Parallel(n_jobs=n_jobs)(
+        delayed(_augmented_rows)(loader(path), copies, seed + position)
+        for position, path in enumerate(inventory["path"]))
+    repeated = inventory.iloc[np.repeat(np.arange(len(inventory)), copies)].reset_index(drop=True)
+    frame = attach_identifiers([row for image_rows in rows for row in image_rows], repeated)
+    frame["augmented"] = True
+    return frame
+
+
+def _perturbed_rows(image: np.ndarray, perturbations) -> list[dict[str, float]]:
     return [describe(perturb(image, kind, value)) for kind, value in perturbations]
 
 
-def robustness_table(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
-                     model, columns: list[str], baseline: np.ndarray,
-                     perturbations=ROBUSTNESS_PERTURBATIONS,
-                     n_jobs: int = N_JOBS) -> pd.DataFrame:
-    """
-    Accuracy and flipped decisions under each perturbation.
-
-    `baseline` is the model's decision on the unmodified images, so "flipped"
-    counts decisions that changed because of the perturbation alone, whether
-    the change was toward the truth or away from it.
-    """
+def perturbed_features(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
+                       perturbations=ROBUSTNESS_PERTURBATIONS,
+                       n_jobs: int = N_JOBS) -> dict[str, pd.DataFrame]:
+    """Features of every image under every perturbation, one table per perturbation."""
     per_image = Parallel(n_jobs=n_jobs)(
-        delayed(_perturbed_features)(loader(p), perturbations) for p in inventory["path"])
-    labels = inventory["label"].to_numpy()
+        delayed(_perturbed_rows)(loader(path), perturbations) for path in inventory["path"])
+    return {f"{kind} {value:g}": attach_identifiers([rows[position] for rows in per_image], inventory)
+            for position, (kind, value) in enumerate(perturbations)}
+
+
+def robustness_table(clean: pd.DataFrame, perturbed: dict[str, pd.DataFrame],
+                     models: dict, columns: list[str]) -> pd.DataFrame:
+    """
+    For each model and perturbation: accuracy, and decisions that flipped.
+
+    A flip is a decision that changed because of the perturbation alone,
+    compared with the same model on the unmodified image, whether the change
+    was toward the truth or away from it.
+    """
+    labels = clean["label"].to_numpy()
     rows = []
-    for position, (kind, value) in enumerate(perturbations):
-        frame = pd.DataFrame([features[position] for features in per_image])[columns]
-        predicted = model.predict(frame)
-        rows.append({
-            "perturbation": f"{kind} {value:g}",
-            "accuracy": round(float((predicted == labels).mean()), 3),
-            "flipped": int((predicted != baseline).sum()),
-            "missed_defects": int(np.sum((labels == DEFECT) & (predicted == OK))),
-            "false_alarms": int(np.sum((labels == OK) & (predicted == DEFECT))),
-        })
+    for name, model in models.items():
+        baseline = model.predict(clean[columns])
+        rows.append({"model": name, "perturbation": "none",
+                     "accuracy": round(float((baseline == labels).mean()), 3), "flipped": 0,
+                     "missed_defects": int(np.sum((labels == DEFECT) & (baseline == OK))),
+                     "false_alarms": int(np.sum((labels == OK) & (baseline == DEFECT)))})
+        for perturbation, frame in perturbed.items():
+            predicted = model.predict(frame[columns])
+            rows.append({
+                "model": name,
+                "perturbation": perturbation,
+                "accuracy": round(float((predicted == labels).mean()), 3),
+                "flipped": int((predicted != baseline).sum()),
+                "missed_defects": int(np.sum((labels == DEFECT) & (predicted == OK))),
+                "false_alarms": int(np.sum((labels == OK) & (predicted == DEFECT))),
+            })
     return pd.DataFrame(rows)

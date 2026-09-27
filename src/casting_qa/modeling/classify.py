@@ -12,6 +12,11 @@ learned. So there are two families, compared on equal terms:
 
 Everything fitted here (scalers, thresholds, hyperparameters) is fitted on the
 exploration split and applied unchanged to validation and test.
+
+Every cross-validation is group-aware. The exploration split holds several
+photographs of some castings, and a fold that trains on one photograph and
+scores another of the same casting measures recognition, not inspection.
+Augmented copies travel with their source image and are never scored.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy.stats import binomtest
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
@@ -33,12 +39,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import (
-    GridSearchCV,
-    RepeatedStratifiedKFold,
-    StratifiedKFold,
-    cross_val_score,
-)
+from sklearn.model_selection import GridSearchCV, StratifiedGroupKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -52,6 +53,7 @@ from casting_qa.config import (
     MATCHED_CONTROL_DRAWS,
     N_JOBS,
     OK,
+    OPERATING_THRESHOLDS,
     OR_GATE_PERCENTILE,
     RANDOM_FOREST_GRID,
     RANDOM_SEED,
@@ -128,11 +130,33 @@ def build_models(seed: int = RANDOM_SEED) -> dict[str, tuple[Pipeline, dict]]:
     }
 
 
-def tune(model: Pipeline, grid: dict, features, labels,
-         folds: int = CV_FOLDS, seed: int = RANDOM_SEED) -> GridSearchCV:
-    """Grid search with stratified folds, scored on defect-class F1."""
-    splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
-    search = GridSearchCV(model, grid, scoring="f1", cv=splitter, n_jobs=N_JOBS)
+def grouped_splits(labels, groups, original=None, folds: int = CV_FOLDS,
+                   seed: int = RANDOM_SEED) -> list[tuple[np.ndarray, np.ndarray]]:
+    """
+    Stratified, group-aware folds that score original images only.
+
+    The original rows are cut into folds that keep every group whole. Each
+    fold's training side is every row, original or augmented, whose group is
+    not held out; its scoring side is the held-out originals. An augmented copy
+    therefore never sits on the opposite side from its source photograph, and
+    no score is computed on a synthetic image.
+    """
+    labels, groups = np.asarray(labels), np.asarray(groups)
+    original = np.ones(len(labels), dtype=bool) if original is None else np.asarray(original, dtype=bool)
+    base = np.flatnonzero(original)
+    splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=seed)
+    splits = []
+    for _, held in splitter.split(base, labels[base], groups[base]):
+        held_out = np.isin(groups, groups[base[held]])
+        splits.append((np.flatnonzero(~held_out), base[held]))
+    return splits
+
+
+def tune(model: Pipeline, grid: dict, features: pd.DataFrame, labels, groups,
+         original=None, folds: int = CV_FOLDS, seed: int = RANDOM_SEED) -> GridSearchCV:
+    """Grid search over group-aware folds, scored on defect-class F1."""
+    splits = grouped_splits(labels, groups, original, folds, seed)
+    search = GridSearchCV(model, grid, scoring="f1", cv=splits, n_jobs=N_JOBS)
     return search.fit(features, labels)
 
 
@@ -161,38 +185,103 @@ def evaluate(labels: np.ndarray, predicted: np.ndarray,
 
 
 def compare_models(explore: pd.DataFrame, validation: pd.DataFrame, columns: list[str],
-                   nuisance: list[str], rule: dict) -> tuple[pd.DataFrame, dict[str, GridSearchCV]]:
+                   nuisance: list[str], rule: dict,
+                   augmented: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, GridSearchCV]]:
     """
     Every approach, fitted on explore and scored on validation, in one table.
 
     The first row is the background floor: the random forest fitted on the
     workbench probes alone, the score available without looking at any metal.
+    Each learned model is then fitted twice, on the explore images alone and on
+    the explore images plus their augmented copies.
     """
     y_explore, y_validation = explore["label"].to_numpy(), validation["label"].to_numpy()
+    groups = explore["group"].to_numpy()
     rows, fitted = [], {}
 
     forest, forest_grid = build_models()["random_forest"]
-    floor = tune(forest, forest_grid, explore[nuisance], y_explore)
+    floor = tune(forest, forest_grid, explore[nuisance], y_explore, groups)
     rows.append({"model": "background floor", **evaluate(
         y_validation, floor.predict(validation[nuisance]), decision_scores(floor, validation[nuisance]))})
-
     rows.append({"model": "rule-based", **evaluate(
         y_validation, apply_rule(validation, rule), rule_score(validation, rule))})
 
-    for name, (model, grid) in build_models().items():
-        search = tune(model, grid, explore[columns], y_explore)
-        fitted[name] = search
-        rows.append({"model": name, **evaluate(
-            y_validation, search.predict(validation[columns]),
-            decision_scores(search, validation[columns]))})
+    combined = pd.concat([explore.assign(augmented=False), augmented], ignore_index=True)
+    training_sets = {
+        "": (explore[columns], y_explore, groups, None),
+        " + augmentation": (combined[columns], combined["label"].to_numpy(),
+                            combined["group"].to_numpy(), ~combined["augmented"].to_numpy()),
+    }
+    for suffix, (features, labels, set_groups, original) in training_sets.items():
+        for name, (model, grid) in build_models().items():
+            search = tune(model, grid, features, labels, set_groups, original)
+            fitted[name + suffix] = search
+            rows.append({"model": name + suffix, **evaluate(
+                y_validation, search.predict(validation[columns]),
+                decision_scores(search, validation[columns]))})
     return pd.DataFrame(rows), fitted
 
 
-def repeated_cv(model, features, labels, folds: int = CV_FOLDS, repeats: int = CV_REPEATS,
+def repeated_cv(model, features: pd.DataFrame, labels, groups, original=None,
+                repeats: int = CV_REPEATS, folds: int = CV_FOLDS,
                 seed: int = RANDOM_SEED) -> np.ndarray:
-    """Defect-class F1 over repeated stratified folds, for the run-to-run spread."""
-    splitter = RepeatedStratifiedKFold(n_splits=folds, n_repeats=repeats, random_state=seed)
-    return cross_val_score(clone(model), features, labels, scoring="f1", cv=splitter, n_jobs=N_JOBS)
+    """Defect-class F1 over repeated group-aware folds, for the run-to-run spread."""
+    splits = [split for repeat in range(repeats)
+              for split in grouped_splits(labels, groups, original, folds, seed + repeat)]
+    return cross_val_score(clone(model), features, labels, scoring="f1", cv=splits, n_jobs=N_JOBS)
+
+
+def _fold_rates(model, features: pd.DataFrame, labels: np.ndarray,
+                train: np.ndarray, held: np.ndarray) -> dict[str, float]:
+    fitted = clone(model).fit(features.iloc[train], labels[train])
+    predicted = fitted.predict(features.iloc[held])
+    truth = labels[held]
+    return {
+        "accuracy": float(accuracy_score(truth, predicted)),
+        "recall_defect": float(recall_score(truth, predicted, pos_label=DEFECT, zero_division=0)),
+        "false_alarm_rate": float(np.mean(predicted[truth == OK] == DEFECT)),
+        "f1_defect": float(f1_score(truth, predicted, pos_label=DEFECT, zero_division=0)),
+    }
+
+
+def grouped_cv_rates(model, features: pd.DataFrame, labels, groups, original=None,
+                     repeats: int = CV_REPEATS, folds: int = CV_FOLDS,
+                     seed: int = RANDOM_SEED) -> pd.DataFrame:
+    """
+    Error rates of one fixed configuration over repeated group-aware folds.
+
+    One split gives one number per rate; this gives a distribution, which is
+    what shows how much a partition of castings can move the false-alarm rate.
+    """
+    labels = np.asarray(labels)
+    splits = [split for repeat in range(repeats)
+              for split in grouped_splits(labels, groups, original, folds, seed + repeat)]
+    rows = Parallel(n_jobs=N_JOBS)(delayed(_fold_rates)(model, features, labels, train, held)
+                                   for train, held in splits)
+    return pd.DataFrame(rows)
+
+
+def operating_points(labels, scores, thresholds=OPERATING_THRESHOLDS) -> pd.DataFrame:
+    """
+    What moving the decision threshold on the classifier's score would do.
+
+    Lowering the threshold rejects more parts: fewer defects escape and more
+    sound parts are re-inspected. The table is the dial a factory would set
+    once it knows what each kind of error costs.
+    """
+    labels, scores = np.asarray(labels), np.asarray(scores)
+    rows = []
+    for threshold in thresholds:
+        predicted = (scores >= threshold).astype(int)
+        rows.append({
+            "threshold": threshold,
+            "rejected": int(predicted.sum()),
+            "missed_defects": int(np.sum((labels == DEFECT) & (predicted == OK))),
+            "false_alarms": int(np.sum((labels == OK) & (predicted == DEFECT))),
+            "recall_defect": round(float(recall_score(labels, predicted, pos_label=DEFECT, zero_division=0)), 3),
+            "precision_defect": round(float(precision_score(labels, predicted, pos_label=DEFECT, zero_division=0)), 3),
+        })
+    return pd.DataFrame(rows)
 
 
 def mcnemar_exact(labels: np.ndarray, first: np.ndarray, second: np.ndarray) -> dict[str, float]:
@@ -315,30 +404,28 @@ def matched_control(features: pd.DataFrame, matched: pd.DataFrame, model,
                     draws: int = MATCHED_CONTROL_DRAWS, folds: int = CV_FOLDS,
                     seed: int = RANDOM_SEED) -> pd.DataFrame:
     """
-    Cross-validated accuracy on the exposure-matched subset against random
-    subsets of the same size and the same 50/50 balance.
+    Group-aware cross-validated accuracy on the exposure-matched subset against
+    random subsets of the same size and the same 50/50 balance.
 
     Exactly one thing differs between the two arms, the exposure matching, so
     a drop on the matched arm is what the lighting shortcut was worth. The same
     tuned model is used on both arms and for both feature sets.
     """
-    splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
-
     def score(frame: pd.DataFrame, subset: list[str]) -> float:
+        splits = grouped_splits(frame["label"], frame["group"], folds=folds, seed=seed)
         return float(cross_val_score(clone(model), frame[subset], frame["label"],
-                                     cv=splitter, n_jobs=N_JOBS).mean())
+                                     cv=splits, n_jobs=N_JOBS).mean())
 
     per_class = len(matched) // 2
-    random_part = [score(balanced_random_subset(features, per_class, seed + d), columns)
-                   for d in range(draws)]
-    random_nuisance = [score(balanced_random_subset(features, per_class, seed + d), nuisance)
-                       for d in range(draws)]
+    subsets = [balanced_random_subset(features, per_class, seed + draw) for draw in range(draws)]
+    random_part = [score(subset, columns) for subset in subsets]
+    random_background = [score(subset, nuisance) for subset in subsets]
     return pd.DataFrame([
         {"subset": f"random balanced, {draws} draws", "images": 2 * per_class,
          "part_features": round(float(np.mean(random_part)), 3),
          "part_features_sd": round(float(np.std(random_part)), 3),
-         "background_features": round(float(np.mean(random_nuisance)), 3),
-         "background_features_sd": round(float(np.std(random_nuisance)), 3)},
+         "background_features": round(float(np.mean(random_background)), 3),
+         "background_features_sd": round(float(np.std(random_background)), 3)},
         {"subset": "exposure-matched", "images": len(matched),
          "part_features": round(score(matched, columns), 3), "part_features_sd": np.nan,
          "background_features": round(score(matched, nuisance), 3), "background_features_sd": np.nan},

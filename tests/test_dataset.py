@@ -18,6 +18,8 @@ from casting_qa.dataset import (
     partition_of,
     split_inventory,
     split_summary,
+    stratified_sample,
+    write_processed,
 )
 from tests.conftest import make_casting
 
@@ -161,3 +163,15 @@ def test_summaries_describe_the_partitions():
     summary = split_summary(*split_inventory(frame))
     assert list(summary["partition"]) == ["explore", "validation", "test"]
     assert summary["share_%"].sum() == pytest.approx(100, abs=0.5)
+
+
+def test_stratified_sample_keeps_the_class_shares():
+    frame = pd.DataFrame({"label": [DEFECT] * 60 + [OK] * 40, "filename": [f"f{i}" for i in range(100)]})
+    sample = stratified_sample(frame, 20)
+    assert len(sample) == 20 and (sample.label == DEFECT).sum() == 12
+
+
+def test_write_processed_writes_every_table_and_the_results(tmp_path):
+    written = write_processed({"a": pd.DataFrame({"x": [1]})}, {"accuracy": 0.9}, tmp_path)
+    assert written == ["a.csv", "test_results.json"]
+    assert "0.9" in (tmp_path / "test_results.json").read_text()

@@ -19,7 +19,10 @@ if it is photographed nearer to or further from the camera.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
+import pandas as pd
 from skimage import filters, measure, morphology, transform
 
 from casting_qa.config import (
@@ -27,6 +30,8 @@ from casting_qa.config import (
     ANCHOR_OPEN_RADIUS,
     ANCHOR_THRESHOLD,
     BACKGROUND_INNER_FACTOR,
+    DEFECT,
+    OK,
     POLAR_ANGULAR_BINS,
     POLAR_RADIAL_BINS,
     RADIAL_PROFILE_BINS,
@@ -52,12 +57,20 @@ def structuring_disk(radius: int, decompose: bool = True) -> np.ndarray | tuple:
 
 
 class Anchor:
-    """Where the part is: the cavity center, its radius, and the rim band."""
+    """
+    Where the part is: the cavity center, its radius, and the rim band.
 
-    def __init__(self, center: tuple[float, float], radius: float, found: bool):
+    `axis_ratio` is the cavity's minor axis over its major axis, 1.0 for a
+    circle. A casting photographed at a tilt appears foreshortened, so this is
+    the natural place to look for tilt; the notebook tests whether it works.
+    """
+
+    def __init__(self, center: tuple[float, float], radius: float, found: bool,
+                 axis_ratio: float = 1.0):
         self.center = center
         self.radius = radius
         self.found = found
+        self.axis_ratio = axis_ratio
 
     @property
     def rim_inner(self) -> float:
@@ -91,7 +104,9 @@ def find_anchor(image: np.ndarray) -> Anchor:
     region = max(measure.regionprops(labeled), key=lambda r: r.area)
     if region.area < ANCHOR_MIN_AREA:
         return fallback
-    return Anchor(region.centroid, float(np.sqrt(region.area / np.pi)), found=True)
+    ratio = region.axis_minor_length / max(region.axis_major_length, 1e-6)
+    return Anchor(region.centroid, float(np.sqrt(region.area / np.pi)), found=True,
+                  axis_ratio=float(ratio))
 
 
 def radius_map(shape: tuple[int, int], anchor: Anchor) -> np.ndarray:
@@ -115,13 +130,6 @@ def rim_mask(image: np.ndarray, anchor: Anchor | None = None) -> np.ndarray:
         anchor = find_anchor(image)
     scaled = radius_map(image.shape, anchor)
     return (scaled >= RIM_INNER_FACTOR) & (scaled <= RIM_OUTER_FACTOR)
-
-
-def part_mask(image: np.ndarray, anchor: Anchor | None = None) -> np.ndarray:
-    """Everything from the part's center out to its edge, cavity included."""
-    if anchor is None:
-        anchor = find_anchor(image)
-    return radius_map(image.shape, anchor) <= RIM_OUTER_FACTOR
 
 
 def background_mask(image: np.ndarray, anchor: Anchor | None = None) -> np.ndarray:
@@ -201,3 +209,14 @@ def radial_profile(image: np.ndarray, anchor: Anchor | None = None,
     with np.errstate(invalid="ignore", divide="ignore"):
         values = np.where(counts > 0, sums / counts, np.nan)
     return values, edges
+
+
+def class_profiles(inventory: pd.DataFrame, loader: Callable[[str], np.ndarray],
+                   per_class: int) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Mean radial profile per class over the first `per_class` images of each."""
+    profiles = {}
+    edges = np.linspace(0.0, RADIAL_PROFILE_EXTENT, RADIAL_PROFILE_BINS + 1)
+    for label, name in ((DEFECT, "defective"), (OK, "ok")):
+        paths = inventory.loc[inventory["label"] == label, "path"].head(per_class)
+        profiles[name] = np.nanmean([radial_profile(loader(path))[0] for path in paths], axis=0)
+    return profiles, edges

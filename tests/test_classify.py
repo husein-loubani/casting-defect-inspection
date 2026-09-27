@@ -15,10 +15,14 @@ from casting_qa.modeling.classify import (
     exposure_matched_pairs,
     fit_or_gate,
     fit_rule,
+    grouped_cv_rates,
+    grouped_splits,
     headline_intervals,
     matched_control,
     mcnemar_exact,
+    operating_points,
     proportion_interval,
+    repeated_cv,
     report,
     rule_score,
     separation_table,
@@ -91,9 +95,43 @@ def test_tuning_and_decision_scores():
     for name in ("random_forest", "svm_rbf"):
         model, grid = build_models()[name]
         small = {key: values[:2] for key, values in grid.items()}
-        search = tune(model, small, frame[columns], frame.label.to_numpy(), folds=3)
+        search = tune(model, small, frame[columns], frame.label.to_numpy(), frame.group, folds=3)
         scores = decision_scores(search, frame[columns])
         assert scores.shape == (len(frame),) and np.isfinite(scores).all()
+
+
+def test_grouped_splits_keep_groups_whole_and_never_score_augmented_rows():
+    """A photograph and its twin, or its augmented copy, must sit on one side of every fold."""
+    labels = np.array([1, 1, 0, 0] * 10)
+    groups = np.arange(40) // 2
+    original = np.ones(40, dtype=bool)
+    original[1::4] = False  # every fourth row is an augmented copy of its neighbor
+    covered = []
+    for train, held in grouped_splits(labels, groups, original, folds=4, seed=0):
+        assert not set(groups[train]) & set(groups[held])
+        assert original[held].all()
+        covered.extend(held)
+    assert sorted(covered) == sorted(np.flatnonzero(original))
+
+
+def test_repeated_cv_and_fold_rates_have_one_row_per_fold():
+    frame = make_feature_frame(80)
+    model, _ = build_models()["svm_rbf"]
+    columns = ["tophat_max", "sobel_mean"]
+    scores = repeated_cv(model, frame[columns], frame.label, frame.group, repeats=2, folds=4)
+    rates = grouped_cv_rates(model, frame[columns], frame.label, frame.group, repeats=2, folds=4)
+    assert len(scores) == 8 and len(rates) == 8
+    assert {"accuracy", "recall_defect", "false_alarm_rate", "f1_defect"} <= set(rates.columns)
+    assert rates["accuracy"].between(0, 1).all()
+
+
+def test_operating_points_trade_misses_for_false_alarms():
+    labels = np.array([1, 1, 1, 0, 0, 0])
+    scores = np.array([2.0, 0.4, -0.3, 0.2, -0.6, -2.0])
+    table = operating_points(labels, scores, thresholds=(-1.0, 0.0, 1.0)).set_index("threshold")
+    assert table.loc[-1.0, "missed_defects"] == 0 and table.loc[-1.0, "false_alarms"] == 2
+    assert table.loc[0.0, "missed_defects"] == 1 and table.loc[0.0, "false_alarms"] == 1
+    assert table.loc[1.0, "missed_defects"] == 2 and table.loc[1.0, "false_alarms"] == 0
 
 
 def test_wilson_interval_matches_a_hand_computed_value():

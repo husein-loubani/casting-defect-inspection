@@ -211,7 +211,7 @@ def plot_feature_separation(table: pd.DataFrame, top: int) -> Figure:
 
 def plot_model_comparison(board: pd.DataFrame, metric: str = "f1_defect") -> Figure:
     """Validation score per approach, with the background floor drawn as a reference."""
-    figure, axis = plt.subplots(figsize=(7, 4))
+    figure, axis = plt.subplots(figsize=(8.5, 4.4))
     best = board.loc[board["model"] != "background floor", metric].idxmax()
     colors = [PALETTE["highlight"] if index == best
               else PALETTE["defective"] if model == "background floor" else PALETTE["ok"]
@@ -220,6 +220,9 @@ def plot_model_comparison(board: pd.DataFrame, metric: str = "f1_defect") -> Fig
     for bar, value in zip(bars, board[metric], strict=True):
         axis.text(bar.get_x() + bar.get_width() / 2, value + 0.01, f"{value:.3f}", ha="center", fontsize=9)
     axis.set_title("Validation defect-class F1 by approach")
+    axis.tick_params(axis="x", labelrotation=20)
+    for label in axis.get_xticklabels():
+        label.set_horizontalalignment("right")
     axis.set_xlabel("Approach")
     axis.set_ylabel("Defect-class F1")
     axis.set_ylim(0, 1.08)
@@ -295,22 +298,36 @@ def plot_localizer_reference(edges: np.ndarray, curve: np.ndarray, quantile: flo
     return figure
 
 
-def plot_robustness(table: pd.DataFrame, baseline_accuracy: float) -> Figure:
-    """Accuracy under each perturbation against the unmodified images."""
-    figure, axis = plt.subplots(figsize=(7, 0.4 * len(table) + 1.6))
-    positions = np.arange(len(table))[::-1]
-    axis.barh(positions, table["accuracy"], color=PALETTE["ok"])
-    axis.axvline(baseline_accuracy, color=PALETTE["defective"], linestyle="--",
-                 label=f"unmodified ({baseline_accuracy:.3f})")
-    for position, (accuracy, flipped) in zip(positions, zip(table["accuracy"], table["flipped"], strict=True),
-                                             strict=True):
-        axis.text(accuracy + 0.01, position, f"{accuracy:.3f}, {flipped} flipped", va="center", fontsize=8)
+def plot_robustness(table: pd.DataFrame) -> Figure:
+    """Decisions flipped by each perturbation, one bar per model."""
+    perturbed = table[table["perturbation"] != "none"]
+    models = list(dict.fromkeys(perturbed["model"]))
+    perturbations = list(dict.fromkeys(perturbed["perturbation"]))
+    figure, axis = plt.subplots(figsize=(7.5, 0.5 * len(perturbations) + 1.8))
+    height = 0.8 / len(models)
+    colors = [PALETTE["neutral"], PALETTE["highlight"], PALETTE["ok"], PALETTE["defective"]]
+    positions = np.arange(len(perturbations))[::-1]
+    for offset, (model, color) in enumerate(zip(models, colors, strict=False)):
+        values = perturbed[perturbed["model"] == model].set_index("perturbation").loc[perturbations, "flipped"]
+        bars = axis.barh(positions + (len(models) / 2 - offset - 0.5) * height, values,
+                         height=height, color=color, label=model)
+        for bar, value in zip(bars, values, strict=True):
+            axis.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2, str(value),
+                      va="center", fontsize=8)
     axis.set_yticks(positions)
-    axis.set_yticklabels(table["perturbation"])
-    axis.set_title("Validation accuracy under controlled changes to the photograph")
-    axis.set_xlabel("Accuracy")
+    axis.set_yticklabels(perturbations)
+    axis.set_title("Validation decisions flipped by a change to the photograph")
+    axis.set_xlabel("Decisions flipped (of the sample)")
     axis.set_ylabel("Perturbation")
-    axis.set_xlim(0, 1.25)
     axis.legend(loc="lower right")
     figure.tight_layout()
     return figure
+
+
+def plot_errors(errors: pd.DataFrame, path_of: pd.Series, loader: Callable,
+                columns: int) -> Figure:
+    """Each misclassified casting with its true class and the classifier's margin."""
+    items = [(loader(path_of[row.filename]),
+              f"{row.filename}\ntrue {CLASS_NAMES[row.label]}, margin {row.margin:+.2f}")
+             for row in errors.itertuples()]
+    return plot_image_grid(items, columns=max(1, min(columns, len(items))))

@@ -94,4 +94,5 @@ def make_feature_frame(n: int = 40, seed: int = 0) -> pd.DataFrame:
     })
     frame["filename"] = [f"img_{i}.jpeg" for i in range(n)]
     frame["label"] = labels
+    frame["group"] = np.arange(n) // 2  # consecutive rows share a casting
     return frame
